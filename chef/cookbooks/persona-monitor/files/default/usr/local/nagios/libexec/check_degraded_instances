@@ -1,0 +1,48 @@
+#!/usr/bin/env python
+import argparse
+import sys
+
+import boto.ec2
+
+ERRORS = {'OK': 0, 'WARNING': 1, 'CRITICAL': 2, 'UNKNOWN': 3}
+
+
+def sendSignal(status, message):
+    print status + ': ' + message
+    sys.exit(ERRORS[status])
+
+
+### main logic
+if __name__ == "__main__":
+    try:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('region', help='region help')
+        parser.add_argument('app_name', help='App tag value')
+        parser.add_argument('env_name', help='Env tag value')
+        conf = parser.parse_args()
+        check_string = 'The instance is running on degraded hardware'
+        connection = boto.ec2.connect_to_region(conf.region)
+        degraded = connection.get_all_instance_status(
+            filters={'event.description': check_string})
+        instance_ids = [i.id for i in degraded]
+        reservations = connection.get_all_instances(instance_ids=instance_ids)
+
+        constraints = {'App': conf.app_name, 'Env': conf.env_name}
+
+        instances = [item for sublist in
+                     [i.instances for i in reservations if
+                      isinstance(i.instances, boto.resultset.ResultSet)] for
+                     item in sublist]
+        actionable = [i for i in instances if
+                      all(item in i.tags.items() for
+                          item in constraints.items())]
+
+        if len(actionable) == 0:
+            sendSignal('OK', 'No instances running on degraded hardware')
+        elif len(actionable) > 0:
+            sendSignal('CRITICAL',
+                       "{} instances running on degraded hardware: {}".format(
+                           len(actionable),
+                           ",".join([i.id for i in actionable])))
+    except Exception as exception:
+        sendSignal('UNKNOWN', 'exception: ' + str(exception))
