@@ -1,6 +1,7 @@
 [
     {
         "name": "persona-org",
+        "application": "persona",
         "subnet" : "public",
         "security_groups" :
         [
@@ -21,10 +22,18 @@
                 8000,
                 "HTTP"
             ]
-        ]
+        ],
+        "healthcheck": {
+            "interval" : 30,
+            "target" : "HTTP:80/__heartbeat__?deep=1",
+            "healthy_threshold" : 3,
+            "timeout" : 5,
+            "unhealthy_threshold" : 5
+        }
     },
     {
-        "name": "browserid-org",
+        "name": "yahoo-login-persona-org",
+        "application": "bridge-yahoo",
         "subnet" : "public",
         "security_groups" :
         [
@@ -38,17 +47,13 @@
                 443,
                 80,
                 "HTTPS",
-                "www.browserid.org"
-            ],
-            [
-                80,
-                8000,
-                "HTTP"
+                "multisan-identity-bridge.login.persona.org"
             ]
         ]
     },
     {
-        "name": "bt-login-persona-org",
+        "name": "gmail-login-persona-org",
+        "application": "bridge-gmail",
         "subnet" : "public",
         "security_groups" :
         [
@@ -62,7 +67,7 @@
                 443,
                 80,
                 "HTTPS",
-                "multisan-bigtent.login.persona.org"
+                "multisan-identity-bridge.login.persona.org"
             ]
         ]
     }

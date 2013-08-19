@@ -1,81 +1,155 @@
 #!/usr/bin/env /usr/bin/python2.7
 import boto.ec2
+import boto.ec2.elb
 import urllib2
 import sys
 import logging
 import json
 import argparse
+import textwrap
+import dns.resolver # easy_install-2.7 dnspython
 
-parser = argparse.ArgumentParser()
+my_metadata = boto.utils.get_instance_metadata()
+default_region = my_metadata['placement']['availability-zone'][0:-1]
+
+conn_ec2 = boto.ec2.connect_to_region(default_region)
+
+my_instance_id = my_metadata['instance-id']
+
+reservations = conn_ec2.get_all_instances(instance_ids=[my_instance_id])
+#my_name = reservations[0].instances[0].tags['Name']
+#my_stack = reservations[0].instances[0].tags['Stack']
+
+#my_vpc = [my_metadata['network']['interfaces']['macs'][x]['vpc-id'] for x in my_metadata['network']['interfaces']['macs'].keys()]
+#my_vpc = my_vpc[0] if len(my_vpc) == 1 else False
+#if not my_vpc:
+#  raise Exception("The instance you're running this from appears to be in %s VPC(s). Aborting" % len(my_vpc))
+
+my_env = reservations[0].instances[0].tags['Env']
+all_envs = ['prod','stage']
+
+parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog=textwrap.dedent('''\
+Examples:
+  Show all stacks
+    get_hosts
+  Show all hosts in a stack
+    get_hosts 0727 -o table
+  Show all hosts in a the current live production stack
+    get_hosts prod -o table
+  Show all webheads and keysigns in a stack in json
+    get_hosts 0727 webhead keysign -o json
+  Iterate over a tier of hosts
+    for host in `get_hosts 0727 dbwrite`; do ssh $host 'hostname'; done
+  Show all ELBs for a stack
+    get_hosts -e -o table 0727
+  Show the persona-org and gmail-login-persona-org ELBs for a stack
+    get_hosts -e 0727 persona-org gmail-login-persona-org'''))
+
 parser.add_argument("-v", "--verbose", help="increase output verbosity",
                     action="store_true")
+parser.add_argument("-e", "--elb", help="query for Elastic Load Balancers instead of instances",
+                    action="store_true")
+parser.add_argument("-r", "--region", help="region to query in (default: %s)" % default_region,
+                    default=default_region, choices=['us-west-2', 'us-east-1'])
+parser.add_argument("-n", "--environment", help="environment to query in (default: %s)" % my_env,
+                    default=my_env, choices=all_envs)
 parser.add_argument("-o", "--output", help="set the output format",
                     choices=["list","json","table"], default="list")
-parser.add_argument("stack", nargs='?', help="The 4 character stack identifier")
+parser.add_argument("stack", nargs='?', help="The 4 character stack identifier or an environment name")
 parser.add_argument("tier", nargs='*', help="The tier or tiers that your searching for")
 args = parser.parse_args()
+
+
+if default_region != args.region:
+  conn_ec2 = boto.ec2.connect_to_region(args.region)
 
 if args.verbose:
   logging.basicConfig(level=logging.DEBUG)
 
-response = urllib2.urlopen('http://169.254.169.254/latest/meta-data/placement/availability-zone')
-region = response.read()[0:-1]
-conn_ec2 = boto.ec2.connect_to_region(region)
-
-response = urllib2.urlopen('http://169.254.169.254/latest/meta-data/instance-id')
-my_instance_id = response.read()
-
-reservations = conn_ec2.get_all_instances(instance_ids=[my_instance_id])
-my_name = reservations[0].instances[0].tags['Name']
-# my_stack = reservations[0].instances[0].tags['Stack']
-# my_stack = my_name.split('-')[-1]
-my_vpc = '-'.join(my_name.split('-')[0:2])
-my_env = reservations[0].instances[0].tags['Env']
-logging.debug([my_name, my_vpc, my_env, args.stack])
-
-
 if args.stack:
   output = []
-  # reservations = conn_ec2.get_all_instances(filters={'tag:App': 'identity', 'tag:Stack' : my_stack})
-  reservations = conn_ec2.get_all_instances(filters={'tag:App': 'identity'})
-  for reservation in reservations:
-    for instance in reservation.instances:
-      my_tiers = args.tier if len(args.tier) > 0 else False
+  my_tiers = args.tier if len(args.tier) > 0 else False
+  if args.stack in all_envs:
+    name_map = {'prod': ('login.persona.org', 'persona-org'),
+                'stage': ('login.anosrep.org', 'w-anosrep-org')}
+    import dns.resolver
+    dns_name = name_map[args.stack][0]
+    cname_prefix = name_map[args.stack][1]
+    answers = dns.resolver.query(dns_name, 'CNAME')
+    if len(answers) != 1:
+      raise Exception("When looking up %s got back %s responses : %s" % (dns_name, len(answers), [x.to_text() for x in answers]))
+    result = answers[0].to_text()
+    logging.debug('result is %s' % result)
+    if result.startswith(cname_prefix):
+      args.environment = args.stack
+      args.stack = result[len(cname_prefix):].split('-')[1]
+    else:
+      raise Exception("The %s environment resolves %s to %s which doesn't have the expected prefix of %s" % (args.stack, dns_name, result, cname_prefix))
+
+  logging.debug('stack is %s' % args.stack)
+  if args.elb:
+    conn_elb = boto.ec2.elb.connect_to_region(args.region)
+    load_balancers = conn_elb.get_all_load_balancers()
+    for load_balancer in load_balancers:
+      env = load_balancer.name.split('-')[-1] if load_balancer.name.split('-')[-1] in all_envs else False
+      pos = -2 if env else -1
+      stack = load_balancer.name.split('-')[pos]
+      name = '-'.join(load_balancer.name.split('-')[0:pos])
+      if stack != args.stack:
+        continue
+      if my_tiers and not name in my_tiers:
+        continue
+      output.append({"name": name,
+                     "dns": load_balancer.dns_name})
+    if args.output == "list":
+      for i in output:
+          print(i['dns'])
+    elif args.output == "table":
+      for i in output:
+        print("{: >23} {}".format(i['name'], i['dns']))
+  else:
+    reservations = conn_ec2.get_all_instances(filters={'tag:App': 'identity', 
+                                                       'tag:Stack' : args.stack})
+    for reservation in reservations:
+      for instance in [x for x in reservation.instances if x.state != 'terminated']:
+    
+        logging.debug(instance.tags['Name'])
   
-      logging.debug(instance.tags['Name'])
-      if len(instance.tags['Name'].split('-')) == 5:
-        stack = instance.tags['Name'].split('-')[-1]
-        # stack = instance.tags['Stack']
-        tier = instance.tags['Name'].split('-')[3]
-        # tier = instance.tags['Tier']
-        vpc = '-'.join(instance.tags['Name'].split('-')[0:2])
-        if vpc == my_vpc and \
-          instance.tags['Env'] == my_env and \
-          stack == args.stack and \
-          (not my_tiers or tier in my_tiers):
-            output.append({"ip": instance.private_ip_address,
-                           "name": instance.tags['Name'],
-                           "tier": tier})
-  if args.output == "list":
-    for i in output:
-        print(i['ip'])
-  elif args.output == "json":
+        #if my_vpc != instance.vpc_id:
+        #    continue
+        if not 'Env' in instance.tags or instance.tags['Env'] != args.environment:
+            continue
+        if not 'Stack' in instance.tags or instance.tags['Stack'] != args.stack:
+            continue
+        if not 'Tier' in instance.tags or (my_tiers and not instance.tags['Tier'] in my_tiers):
+            continue
+        output.append({"ip": instance.private_ip_address,
+                       "name": instance.tags['Name'],
+                       "tier": instance.tags['Tier'],
+                       "id": instance.id})
+    if args.output == "list":
+      for i in output:
+          print(i['ip'])
+    elif args.output == "table":
+      for i in output:
+        print("{: >13} {: >10} {: >13} {}".format(i['ip'], i['id'], i['tier'], i['name']))
+
+  if args.output == "json":
     print(json.dumps(output, sort_keys=True, indent=4, separators=(',', ': ')))
-  elif args.output == "table":
-    for i in output:
-      print("%s\t%s\t%s" % (i['ip'], i['name'], i['tier']))
+
+
 else:
   output = []
   reservations = conn_ec2.get_all_instances(filters={'tag:App': 'identity'})
   for reservation in reservations:
-    for instance in reservation.instances:
-      if len(instance.tags['Name'].split('-')) == 5:
-        stack = instance.tags['Name'].split('-')[-1]
-        vpc = '-'.join(instance.tags['Name'].split('-')[0:2])
-        if stack not in [x['stack'] for x in output]:
-          output.append({"stack": stack,
-                         "vpc": vpc})
-          # output.append(instance.tags['Stack'])
+    for instance in [x for x in reservation.instances if x.state != 'terminated']:
+      if 'Stack' in instance.tags:
+        if not instance.tags['Stack'] in [x['stack'] for x in output]:
+          output.append({"stack": instance.tags['Stack'],
+                         "environment": instance.tags['Env'],
+                         "vpc": instance.vpc_id})
+      
   if args.output == "list":
     for i in output:
         print(i['stack'])
@@ -83,4 +157,4 @@ else:
     print(json.dumps(output, sort_keys=True, indent=4, separators=(',', ': ')))
   elif args.output == "table":
     for i in output:
-      print("%s\t%s" % (i['stack'], i['vpc']))
+      print("{: >5} {: >6} {}".format(i['stack'], i['environment'], i['vpc']))

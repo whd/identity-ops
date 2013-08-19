@@ -40,7 +40,7 @@ reload_ohai ||= res.updated?
 
 # Note max hostname length : 64
 short_hostname=node[:ec2][:instance_id] ? node[:ec2][:instance_id] : "ip-#{node[:ipaddress].tr('.','-')}"
-new_hostname=short_hostname + 
+fqdn=short_hostname + 
              (node[:tier] ? ".#{node[:tier]}" : "") + 
              (node[:stack][:name] ? ".#{node[:stack][:name]}" : "") +  
              (node[:stack][:type] ? ".#{node[:stack][:type]}" : "") +
@@ -50,7 +50,8 @@ new_hostname=short_hostname +
 res = template "/etc/hosts" do
         source "etc/hosts.erb"
         variables(
-          :hostname => new_hostname
+          :hostname => short_hostname,
+          :fqdn => fqdn
         )
         user "root"
         group "root"
@@ -59,8 +60,8 @@ res = template "/etc/hosts" do
 res.run_action(:create)
 reload_ohai ||= res.updated?
 
-res = execute "hostname #{new_hostname}" do
-        not_if {node[:fqdn] == new_hostname}
+res = execute "hostname #{short_hostname}" do
+        not_if {node[:hostname] == short_hostname}
       end
 res.run_action(:run)
 reload_ohai ||= res.updated?
@@ -73,18 +74,18 @@ end
 ruby_block "inject_hostname" do
   block do
     f = Chef::Util::FileEdit.new("/etc/sysconfig/network")
-    f.search_file_replace_line(/^HOSTNAME=/, "HOSTNAME=#{new_hostname}")
+    f.search_file_replace_line(/^HOSTNAME=/, "HOSTNAME=#{short_hostname}")
     f.write_file
   end
   not_if do
-    open('/etc/sysconfig/network') { |f| f.lines.find { |line| line.include?("HOSTNAME=#{new_hostname}") } }
+    open('/etc/sysconfig/network') { |f| f.lines.find { |line| line.include?("HOSTNAME=#{short_hostname}") } }
   end
 end
 
 # template "/etc/sysconfig/network" do
   # source "etc/sysconfig/network.erb"
   # variables(
-    # :hostname => new_hostname
+    # :hostname => short_hostname
   # )
   # user "root"
   # group "root"
