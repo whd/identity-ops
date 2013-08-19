@@ -23,6 +23,7 @@ if __name__ == "__main__":
         check_string = 'The instance is running on degraded hardware'
         connection = boto.ec2.connect_to_region(conf.region)
         degraded = connection.get_all_instance_status(
+            instance_ids=None,
             filters={'event.description': check_string})
         instance_ids = [i.id for i in degraded]
         reservations = connection.get_all_instances(instance_ids=instance_ids)
